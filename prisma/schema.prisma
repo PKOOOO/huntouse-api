@@ -42,30 +42,36 @@ enum PropertyType {
   TOWNHOUSES
   STUDIOS
   PENTHOUSES
+  /// Single room with a kitchenette and bathroom — the most common Kenyan rental.
+  BEDSITTERS
 }
 
 model User {
-  id            String                @id @default(cuid())
-  clerkId       String                @unique
+  id                String                @id @default(cuid())
+  clerkId           String                @unique
   /// Primary email from Clerk. Not unique: a deleted account's row keeps its old email.
-  email         String?
-  firstName     String?
-  lastName      String?
-  imageUrl      String?
-  roles         Role[]                @default([SEEKER])
+  email             String?
+  firstName         String?
+  lastName          String?
+  imageUrl          String?
+  roles             Role[]                @default([SEEKER])
   /// True while `roles` haven't been mirrored to Clerk publicMetadata yet (e.g. Clerk was
   /// unreachable during an approval). Retried on the user's next API call.
-  clerkRolesStale Boolean             @default(false)
-  status        UserStatus            @default(ACTIVE)
-  profile       Profile?
+  clerkRolesStale   Boolean               @default(false)
+  status            UserStatus            @default(ACTIVE)
+  profile           Profile?
   /// Set for approved agents; an agency can have several agent members.
-  agencyId      String?
-  agency        Agency?               @relation(fields: [agencyId], references: [id])
-  verifications VerificationRequest[] @relation("applicant")
-  reviewed      VerificationRequest[] @relation("reviewer")
-  createdAt     DateTime              @default(now())
-  updatedAt     DateTime              @updatedAt
-  deletedAt     DateTime?
+  agencyId          String?
+  agency            Agency?               @relation(fields: [agencyId], references: [id])
+  verifications     VerificationRequest[] @relation("applicant")
+  reviewed          VerificationRequest[] @relation("reviewer")
+  listings          Listing[]             @relation("lister")
+  reviewedListings  Listing[]             @relation("listingReviewer")
+  createdAt         DateTime              @default(now())
+  updatedAt         DateTime              @updatedAt
+  deletedAt         DateTime?
+  viewingsRequested ViewingRequest[]      @relation("viewingSeeker")
+  viewingsHosted    ViewingRequest[]      @relation("viewingHost")
 
   @@index([email])
 }
@@ -151,13 +157,14 @@ model VerificationDocument {
 }
 
 model Agency {
-  id         String   @id @default(cuid())
+  id         String    @id @default(cuid())
   name       String
   location   String?
   earbNumber String?
   members    User[]
-  createdAt  DateTime @default(now())
-  updatedAt  DateTime @updatedAt
+  listings   Listing[]
+  createdAt  DateTime  @default(now())
+  updatedAt  DateTime  @updatedAt
 }
 
 /// Answers from the app's profile-setup wizard.
@@ -181,4 +188,194 @@ model ProcessedWebhook {
   id         String   @id
   type       String
   receivedAt DateTime @default(now())
+}
+
+// ---------------------------------------------------------------------------------------------
+// Listings. Phase 1 = long-term monthly RENTALS only; `purpose` keeps SALE ready for phase 2.
+// Only verified owners / agents can list; an admin approves every listing before it goes live.
+// ---------------------------------------------------------------------------------------------
+
+enum ListingPurpose {
+  RENT
+  SALE
+}
+
+enum ListerType {
+  /// Direct owner (verified OWNER role).
+  OWNER
+  /// Verified agent acting for the owner; the listing belongs to their agency.
+  AGENT
+}
+
+enum ListingStatus {
+  /// Being written by the lister.
+  DRAFT
+  /// Submitted; waiting for an admin.
+  PENDING_REVIEW
+  /// Approved and visible to seekers.
+  LIVE
+  /// Admin rejected with a reason; the lister can fix and resubmit.
+  REJECTED
+  /// Taken down by the lister (or an admin). Kept for history.
+  ARCHIVED
+}
+
+/// Freshness is the product promise: listers flip this in one tap.
+enum Availability {
+  VACANT
+  TAKEN
+}
+
+enum Furnishing {
+  UNFURNISHED
+  SEMI_FURNISHED
+  FURNISHED
+}
+
+enum ListingDocumentKind {
+  /// Owner: title deed, lease, sale agreement or utility bill for THIS property.
+  OWNERSHIP_PROOF
+  /// Agent (sales, phase 2): owner's mandate / listing agreement.
+  MANDATE
+}
+
+model Listing {
+  id         String         @id @default(cuid())
+  listerId   String
+  lister     User           @relation("lister", fields: [listerId], references: [id])
+  listerType ListerType
+  /// Set for agent listings.
+  agencyId   String?
+  agency     Agency?        @relation(fields: [agencyId], references: [id])
+  purpose    ListingPurpose @default(RENT)
+  status     ListingStatus  @default(DRAFT)
+
+  propertyType PropertyType?
+  title        String?
+  description  String?
+
+  /// One of Kenya's 47 counties (see lib/kenya.ts).
+  county      String?
+  /// Estate / neighbourhood, e.g. "Kilimani". Shown to seekers.
+  area        String?
+  /// Exact location — PRIVATE: only the lister and admins see it; seekers see `area` only.
+  addressLine String?
+  latitude    Float?
+  longitude   Float?
+
+  bedrooms         Int?
+  bathrooms        Int?
+  sizeSqm          Int?
+  furnishing       Furnishing?
+  availableFrom    DateTime?   @db.Date
+  /// Whole Kenyan shillings.
+  monthlyRentKes   Int?
+  depositKes       Int?
+  serviceChargeKes Int?
+  /// Keys from lib/listings.ts AMENITIES.
+  amenities        String[]
+
+  availability          Availability @default(VACANT)
+  availabilityUpdatedAt DateTime     @default(now())
+
+  /// Lead stats from day one (Pro dashboard + lead guarantee later).
+  viewCount           Int @default(0)
+  saveCount           Int @default(0)
+  inquiryCount        Int @default(0)
+  viewingRequestCount Int @default(0)
+
+  submittedAt     DateTime?
+  reviewedAt      DateTime?
+  reviewedById    String?
+  reviewedBy      User?     @relation("listingReviewer", fields: [reviewedById], references: [id])
+  rejectionReason String?
+  publishedAt     DateTime?
+  archivedAt      DateTime?
+
+  photos          ListingPhoto[]
+  documents       ListingDocument[]
+  viewingRequests ViewingRequest[]
+  createdAt       DateTime          @default(now())
+  updatedAt       DateTime          @updatedAt
+
+  @@index([listerId, status])
+  @@index([status, submittedAt])
+  @@index([status, availability, county])
+}
+
+/// A photo in the public listings bucket. position 0 is the cover.
+model ListingPhoto {
+  id          String   @id @default(cuid())
+  listingId   String
+  listing     Listing  @relation(fields: [listingId], references: [id], onDelete: Cascade)
+  storageKey  String   @unique
+  contentType String
+  sizeBytes   Int
+  position    Int
+  createdAt   DateTime @default(now())
+
+  @@index([listingId, position])
+}
+
+/// A document in the PRIVATE kyc bucket. One current document per kind per listing.
+model ListingDocument {
+  id          String              @id @default(cuid())
+  listingId   String
+  listing     Listing             @relation(fields: [listingId], references: [id], onDelete: Cascade)
+  kind        ListingDocumentKind
+  storageKey  String              @unique
+  contentType String
+  sizeBytes   Int
+  createdAt   DateTime            @default(now())
+
+  @@unique([listingId, kind])
+}
+
+// ---------------------------------------------------------------------------------------------
+// Viewing requests — the first contact between a renter and a host. Nobody pays before viewing;
+// phone numbers stay private, and the exact address is only shown once the host accepts.
+// ---------------------------------------------------------------------------------------------
+
+enum ViewingStatus {
+  /// Waiting for the host.
+  REQUESTED
+  ACCEPTED
+  DECLINED
+  /// Withdrawn by the renter.
+  CANCELLED
+}
+
+enum ViewingSlot {
+  /// 9am – 12pm
+  MORNING
+  /// 12pm – 3pm
+  AFTERNOON
+  /// 3pm – 6pm
+  EVENING
+}
+
+model ViewingRequest {
+  id          String        @id @default(cuid())
+  listingId   String
+  listing     Listing       @relation(fields: [listingId], references: [id], onDelete: Cascade)
+  seekerId    String
+  seeker      User          @relation("viewingSeeker", fields: [seekerId], references: [id])
+  /// The listing's lister when the request was made (who must answer it).
+  hostId      String
+  host        User          @relation("viewingHost", fields: [hostId], references: [id])
+  status      ViewingStatus @default(REQUESTED)
+  date        DateTime      @db.Date
+  slot        ViewingSlot
+  /// Renter's note, e.g. "Can I come with my sister?"
+  message     String?
+  /// Host's reply, e.g. directions or why it was declined.
+  hostNote    String?
+  respondedAt DateTime?
+  cancelledAt DateTime?
+  createdAt   DateTime      @default(now())
+  updatedAt   DateTime      @updatedAt
+
+  @@index([hostId, status, date])
+  @@index([seekerId, createdAt])
+  @@index([listingId, seekerId, status])
 }

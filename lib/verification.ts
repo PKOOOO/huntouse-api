@@ -70,7 +70,7 @@ export function missingForSubmit(req: RequestWithDocs) {
 
 /** Confirms every registered document really is in R2 with the declared size. */
 export async function documentsUploaded(req: RequestWithDocs) {
-  const sizes = await Promise.all(req.documents.map((d) => objectSize(d.storageKey)));
+  const sizes = await Promise.all(req.documents.map((d) => objectSize('kyc', d.storageKey)));
   return req.documents.filter((d, i) => sizes[i] !== d.sizeBytes).map((d) => d.kind);
 }
 
@@ -117,7 +117,7 @@ export async function documentViewUrls(req: RequestWithDocs) {
     req.documents.map(async (d) => ({
       kind: d.kind,
       contentType: d.contentType,
-      url: await presignView(d.storageKey),
+      url: await presignView('kyc', d.storageKey),
     })),
   );
 }

@@ -12,6 +12,14 @@ export default async function AdminLayout({ children }: LayoutProps<'/admin'>) {
           <span className="inline-block h-3 w-3 rounded-full bg-[#EC6846]" />
           Huntouse Admin
         </Link>
+        <nav className="flex flex-1 gap-4 pl-8 text-sm text-zinc-600">
+          <Link href="/admin" className="hover:text-zinc-900">
+            Verifications
+          </Link>
+          <Link href="/admin/listings" className="hover:text-zinc-900">
+            Listings
+          </Link>
+        </nav>
         <UserButton />
       </header>
       <main className="mx-auto w-full max-w-5xl flex-1 p-6">{children}</main>
