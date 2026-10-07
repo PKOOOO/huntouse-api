@@ -1,0 +1,184 @@
+// Huntouse database schema. Users mirror Clerk accounts (synced by the Clerk webhook and
+// lazily on first API call); roles live here and are mirrored to Clerk publicMetadata.
+
+generator client {
+  provider = "prisma-client"
+  output   = "../app/generated/prisma"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+/// A user can hold several roles (e.g. seeker + owner). Everyone starts as SEEKER.
+/// OWNER / AGENT are granted after verification; ADMIN is only ever granted manually.
+enum Role {
+  SEEKER
+  OWNER
+  AGENT
+  ADMIN
+}
+
+enum UserStatus {
+  ACTIVE
+  SUSPENDED
+  /// Clerk account deleted; row kept for history (listings, reviews, payments).
+  DELETED
+}
+
+enum Goal {
+  RENT
+  BUY
+  INVEST
+  COMMERCIAL
+}
+
+enum PropertyType {
+  HOME
+  APARTMENTS
+  CONDOS
+  LOFTS
+  VILLAS
+  TOWNHOUSES
+  STUDIOS
+  PENTHOUSES
+}
+
+model User {
+  id            String                @id @default(cuid())
+  clerkId       String                @unique
+  /// Primary email from Clerk. Not unique: a deleted account's row keeps its old email.
+  email         String?
+  firstName     String?
+  lastName      String?
+  imageUrl      String?
+  roles         Role[]                @default([SEEKER])
+  /// True while `roles` haven't been mirrored to Clerk publicMetadata yet (e.g. Clerk was
+  /// unreachable during an approval). Retried on the user's next API call.
+  clerkRolesStale Boolean             @default(false)
+  status        UserStatus            @default(ACTIVE)
+  profile       Profile?
+  /// Set for approved agents; an agency can have several agent members.
+  agencyId      String?
+  agency        Agency?               @relation(fields: [agencyId], references: [id])
+  verifications VerificationRequest[] @relation("applicant")
+  reviewed      VerificationRequest[] @relation("reviewer")
+  createdAt     DateTime              @default(now())
+  updatedAt     DateTime              @updatedAt
+  deletedAt     DateTime?
+
+  @@index([email])
+}
+
+// ---------------------------------------------------------------------------------------------
+// Host verification (owner / agent). Free for everyone — safety is the product promise.
+// ---------------------------------------------------------------------------------------------
+
+enum VerificationKind {
+  OWNER
+  AGENT
+}
+
+enum VerificationStatus {
+  /// Being filled in by the applicant.
+  DRAFT
+  /// Submitted; waiting for an admin.
+  PENDING
+  APPROVED
+  /// Admin rejected with a reason; the applicant can fix and resubmit.
+  REJECTED
+}
+
+enum IdDocumentType {
+  NATIONAL_ID
+  PASSPORT
+  ALIEN_ID
+}
+
+enum DocumentKind {
+  ID_FRONT
+  ID_BACK
+  SELFIE
+  /// Owner: title deed, lease, sale agreement or utility bill in their name.
+  OWNERSHIP_PROOF
+  /// Agent: EARB practising certificate.
+  AGENT_LICENSE
+}
+
+model VerificationRequest {
+  id              String                 @id @default(cuid())
+  userId          String
+  user            User                   @relation("applicant", fields: [userId], references: [id], onDelete: Cascade)
+  kind            VerificationKind
+  status          VerificationStatus     @default(DRAFT)
+  idType          IdDocumentType?
+  /// Salted SHA-256 of the normalized ID number — detects one ID used by several accounts
+  /// without storing the number itself. Admins read the full number from the ID photo.
+  idNumberHash    String?
+  idNumberLast4   String?
+  /// Agent only: Estate Agents Registration Board number.
+  earbNumber      String?
+  agencyName      String?
+  agencyLocation  String?
+  /// When the applicant agreed to the processing of their identity documents (Kenya DPA).
+  consentAt       DateTime?
+  submittedAt     DateTime?
+  reviewedAt      DateTime?
+  reviewedById    String?
+  reviewedBy      User?                  @relation("reviewer", fields: [reviewedById], references: [id])
+  rejectionReason String?
+  documents       VerificationDocument[]
+  createdAt       DateTime               @default(now())
+  updatedAt       DateTime               @updatedAt
+
+  @@index([status, submittedAt])
+  @@index([userId, kind])
+  @@index([idNumberHash])
+}
+
+/// A file in the private R2 bucket. One current document per kind per request.
+model VerificationDocument {
+  id          String              @id @default(cuid())
+  requestId   String
+  request     VerificationRequest @relation(fields: [requestId], references: [id], onDelete: Cascade)
+  kind        DocumentKind
+  storageKey  String              @unique
+  contentType String
+  sizeBytes   Int
+  createdAt   DateTime            @default(now())
+
+  @@unique([requestId, kind])
+}
+
+model Agency {
+  id         String   @id @default(cuid())
+  name       String
+  location   String?
+  earbNumber String?
+  members    User[]
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+}
+
+/// Answers from the app's profile-setup wizard.
+model Profile {
+  userId           String         @id
+  user             User           @relation(fields: [userId], references: [id], onDelete: Cascade)
+  /// Country of residence (ISO 3166-1 alpha-2).
+  countryCode      String?
+  /// Country whose dial code prefixes `phone` (ISO 3166-1 alpha-2). Unverified for now.
+  phoneCountryCode String?
+  phone            String?
+  birthday         DateTime?      @db.Date
+  goals            Goal[]
+  propertyTypes    PropertyType[]
+  setupCompletedAt DateTime?
+  updatedAt        DateTime       @updatedAt
+}
+
+/// Svix message ids already handled, so Clerk's webhook retries are processed once.
+model ProcessedWebhook {
+  id         String   @id
+  type       String
+  receivedAt DateTime @default(now())
+}
